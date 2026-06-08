@@ -1,0 +1,20 @@
+apiVersion: v2
+name: kubernetes-dashboard
+description: Kubernetes Dashboard (official upstream wrapper). Web UI with optional admin ServiceAccount.
+type: application
+version: 1.0.0
+appVersion: "7.10.0"
+kubeVersion: ">=1.22.0-0"
+keywords:
+  - kubernetes
+  - dashboard
+  - cluster-tools
+home: https://github.com/kubernetes/dashboard
+sources:
+  - https://github.com/kubernetes/dashboard
+# kubernetes.github.io/dashboard index 404s after archive; CI vendors 7.10.0 tgz from GitHub releases.
+dependencies:
+  - name: kubernetes-dashboard
+    alias: dashboard
+    version: "7.10.0"
+    repository: https://kubernetes.github.io/dashboard

@@ -1,0 +1,135 @@
+name: Helm chart CI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'Chart.yaml'
+      - 'values.yaml'
+      - 'values/**'
+      - 'README.md'
+      - '.helmignore'
+      - 'templates/**'
+      - 'scripts/**'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'Chart.yaml'
+      - 'values.yaml'
+      - 'values/**'
+      - 'README.md'
+      - '.helmignore'
+      - 'templates/**'
+      - 'scripts/**'
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      baseline_version:
+        description: 'First release version when no tags exist (e.g. 1.0.0)'
+        required: false
+      release_tag:
+        description: 'Release tag override (e.g. kubernetes-dashboard-v1.0.0)'
+        required: false
+
+concurrency: helm-chart-kubernetes-dashboard
+
+jobs:
+  validate:
+    if: github.event_name == 'pull_request' || github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch archived upstream dashboard chart
+        run: bash scripts/fetch-upstream-dependency.sh
+      - name: Lint and render
+        run: |
+          set -euo pipefail
+          helm lint .
+          helm template release . -f values.yaml -n cluster-tools > /dev/null
+
+  release:
+    if: |
+      always() &&
+      !cancelled() &&
+      (needs.validate.result == 'success' || needs.validate.result == 'skipped') &&
+      (
+        github.event_name == 'push' ||
+        (github.event_name == 'workflow_dispatch' && inputs.baseline_version != '')
+      )
+    needs: validate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Release on merge (create tag and release)
+        uses: expectedbehaviors/github-actions/.github/actions/release-on-merge@main
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          tag_prefix: kubernetes-dashboard-v
+          initial_version: ${{ github.event.inputs.baseline_version || '' }}
+          version_bump: patch
+
+  publish:
+    needs: release
+    if: |
+      always() &&
+      !cancelled() &&
+      !contains(needs.*.result, 'failure') &&
+      (needs.release.result == 'success' || needs.release.result == 'skipped') &&
+      (
+        (github.event_name == 'release' && startsWith(github.event.release.tag_name, 'kubernetes-dashboard-v')) ||
+        (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push') ||
+        github.event_name == 'workflow_dispatch'
+      )
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.14.0
+      - name: Fetch archived upstream dashboard chart
+        run: bash scripts/fetch-upstream-dependency.sh
+      - name: Package and publish (vendored upstream; skip helm dependency update)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "release" ]; then
+            TAG="${{ github.event.release.tag_name }}"
+          elif [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ github.event.inputs.release_tag }}" ]; then
+            TAG="${{ github.event.inputs.release_tag }}"
+          else
+            TAG=$(gh api "repos/${{ github.repository }}/releases?per_page=1" | jq -r '.[0].tag_name')
+          fi
+          VERSION="${TAG#kubernetes-dashboard-v}"
+          helm package . --version "$VERSION" --app-version "$VERSION"
+          gh release upload "$TAG" "kubernetes-dashboard-${VERSION}.tgz" --clobber
+          OWNER="${GITHUB_REPOSITORY%/*}"
+          REPO="${GITHUB_REPOSITORY#*/}"
+          HELM_REPO_URL="https://${OWNER}.github.io/${REPO}"
+          if git clone --branch gh-pages --depth 1 "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" pages_build 2>/dev/null; then
+            :
+          else
+            git clone --depth 1 "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" pages_build
+            cd pages_build && git checkout --orphan gh-pages && git rm -rf . 2>/dev/null || true && cd ..
+          fi
+          cd pages_build
+          cp "../kubernetes-dashboard-${VERSION}.tgz" .
+          if [ -f index.yaml ]; then
+            helm repo index . --url "$HELM_REPO_URL" --merge index.yaml
+          else
+            helm repo index . --url "$HELM_REPO_URL"
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add index.yaml *.tgz
+          git diff --staged --quiet || git commit -m "helm: add kubernetes-dashboard-${VERSION}.tgz"
+          git push origin gh-pages

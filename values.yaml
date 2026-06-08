@@ -1,0 +1,22 @@
+# Baseline Kubernetes Dashboard values. Override ingress hosts and cluster settings in your deployment values.
+
+dashboard:
+  app:
+    mode: dashboard
+    settings:
+      global:
+        clusterName: my-cluster
+        itemsPerPage: 50
+        defaultNamespace: default
+    ingress:
+      annotations:
+        external-dns.alpha.kubernetes.io/target: example.com
+      enabled: true
+      hosts:
+        - kubernetes-dashboard.example.com
+      ingressClassName: nginx
+      pathType: Prefix
+  api:
+    containers:
+      args:
+        - --enable-skip-login
